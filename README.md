@@ -55,11 +55,6 @@ using the `http://` form.
 Note that when using virtio the drives will be mounted as `/dev/vda` and `/dev/vdb`,
 instead of the usual `/dev/cdrom` and `/dev/sda`, since they are using paravirtualization.
 
-If using the real network (tap or bridge), note that it needs a DHCP server running.
-The user network has it's own NAT network, which usually means it is running on 10.0.2.15
-Ultimately this driver should be able to query for IP, but for now the workaround is
-to use `--qemu-network-address` (and fixed addresses) until that feature is implemented.
-
 Environment variables:
 
 Here comes the list of the supported variables with the corresponding options. If both environment
