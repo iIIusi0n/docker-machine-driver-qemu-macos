@@ -3,10 +3,10 @@ package qemu
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -36,32 +36,29 @@ type Driver struct {
 	EnginePort int
 	FirstQuery bool
 
-	Memory           int
-	DiskSize         int
-	CPU              int
-	Program          string
-	Display          bool
-	DisplayType      string
-	Nographic        bool
-	VirtioDrives     bool
-	Network          string
-	PrivateNetwork   string
-	Boot2DockerURL   string
-	NetworkInterface string
-	NetworkAddress   string
-	NetworkBridge    string
-	CaCertPath       string
-	PrivateKeyPath   string
-	DiskPath         string
-	CacheMode        string
-	IOMode           string
-	connectionString string
-	//	conn             *libvirt.Connect
-	//	VM               *libvirt.Domain
-	vmLoaded        bool
+	Memory          int
+	DiskSize        int
+	CPU             int
+	Program         string
+	Display         bool
+	DisplayType     string
+	Nographic       bool
+	VirtioDrives    bool
+	Boot2DockerURL  string
+	PrivateNetwork  string
+	Network         string
+	NetworkBridge   string
+	NetworkVmnetID  string
+	CaCertPath      string
+	PrivateKeyPath  string
+	DiskPath        string
+	CacheMode       string
+	IOMode          string
 	UserDataFile    string
 	CloudConfigRoot string
 	LocalPorts      string
+	MacAddress      string
+	IpAddress       string
 }
 
 func (d *Driver) GetCreateFlags() []mcnflag.Flag {
@@ -105,29 +102,25 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage:  "Use virtio for drives (cdrom and disk)",
 		},
 		mcnflag.StringFlag{
-			Name:  "qemu-network",
-			Usage: "Name of network to connect to (user, tap, bridge)",
-			Value: "user",
-		},
-		mcnflag.StringFlag{
 			EnvVar: "QEMU_BOOT2DOCKER_URL",
 			Name:   "qemu-boot2docker-url",
 			Usage:  "The URL of the boot2docker image. Defaults to the latest available version",
 			Value:  "",
 		},
 		mcnflag.StringFlag{
-			Name:  "qemu-network-interface",
-			Usage: "Name of the network interface to be used for networking (for tap)",
-			Value: "tap0",
-		},
-		mcnflag.StringFlag{
-			Name:  "qemu-network-address",
-			Usage: "IP of the network adress to be used for networking (for tap)",
+			Name:  "qemu-network",
+			Usage: "Name of network to connect to (vmnet-shared, vmnet-host, vmnet-bridged)",
+			Value: "vmnet-shared",
 		},
 		mcnflag.StringFlag{
 			Name:  "qemu-network-bridge",
-			Usage: "Name of the network bridge to be used for networking (for bridge)",
-			Value: "br0",
+			Usage: "Name of the network bridge to be used for networking (for vmnet-bridged)",
+			Value: "en0",
+		},
+		mcnflag.StringFlag{
+			Name:  "qemu-network-vmnet-id",
+			Usage: "The vmnet id to use for networking",
+			Value: "net0",
 		},
 		mcnflag.StringFlag{
 			Name:  "qemu-cache-mode",
@@ -168,8 +161,7 @@ func (d *Driver) GetMachineName() string {
 }
 
 func (d *Driver) GetSSHHostname() (string, error) {
-	return "localhost", nil
-	//return d.GetIP()
+	return d.GetIP()
 }
 
 func (d *Driver) GetSSHKeyPath() string {
@@ -206,11 +198,10 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.DisplayType = flags.String("qemu-display-type")
 	d.Nographic = flags.Bool("qemu-nographic")
 	d.VirtioDrives = flags.Bool("qemu-virtio-drives")
-	d.Network = flags.String("qemu-network")
 	d.Boot2DockerURL = flags.String("qemu-boot2docker-url")
-	d.NetworkInterface = flags.String("qemu-network-interface")
-	d.NetworkAddress = flags.String("qemu-network-address")
+	d.Network = flags.String("qemu-network")
 	d.NetworkBridge = flags.String("qemu-network-bridge")
+	d.NetworkVmnetID = flags.String("qemu-network-vmnet-id")
 	d.CacheMode = flags.String("qemu-cache-mode")
 	d.IOMode = flags.String("qemu-io-mode")
 
@@ -256,10 +247,7 @@ func NewDriver(hostName, storePath string) drivers.Driver {
 }
 
 func (d *Driver) GetIP() (string, error) {
-	if d.Network == "user" {
-		return "127.0.0.1", nil
-	}
-	return d.NetworkAddress, nil
+	return d.IpAddress, nil
 }
 
 func (d *Driver) GetPort() int {
@@ -297,7 +285,7 @@ func (d *Driver) GetState() (state.State, error) {
 		os.Remove(d.pidfilePath())
 		return state.Stopped, nil
 	}
-	ret, err := d.RunQMPCommand("query-status")
+	ret, err := d.RunQMPCommand("query-status", nil)
 	if err != nil {
 		return state.Error, err
 	}
@@ -323,29 +311,6 @@ func (d *Driver) PreCreateCheck() error {
 
 func (d *Driver) Create() error {
 	var err error
-	if d.Network == "user" {
-		minPort, maxPort, err := parsePortRange(d.LocalPorts)
-		log.Debugf("port range: %d -> %d", minPort, maxPort)
-		if err != nil {
-			return err
-		}
-		d.SSHPort, err = getAvailableTCPPortFromRange(minPort, maxPort)
-		if err != nil {
-			return err
-		}
-
-		for {
-			d.EnginePort, err = getAvailableTCPPortFromRange(minPort, maxPort)
-			if err != nil {
-				return err
-			}
-			if d.EnginePort == d.SSHPort {
-				// can't have both on same port
-				continue
-			}
-			break
-		}
-	}
 	b2dutils := mcnutils.NewB2dUtils(d.StorePath)
 	if err := b2dutils.CopyIsoToMachineDir(d.Boot2DockerURL, d.MachineName); err != nil {
 		return err
@@ -372,70 +337,41 @@ func (d *Driver) Create() error {
 	return d.Start()
 }
 
-func parsePortRange(rawPortRange string) (int, int, error) {
-	if rawPortRange == "" {
-		return 0, 65535, nil
-	}
+func generateRandomMAC() (string, error) {
+	mac := make([]byte, 6)
 
-	portRange := strings.Split(rawPortRange, "-")
-
-	minPort, err := strconv.Atoi(portRange[0])
+	_, err := rand.Read(mac)
 	if err != nil {
-		return 0, 0, fmt.Errorf("Invalid port range")
-	}
-	maxPort, err := strconv.Atoi(portRange[1])
-	if err != nil {
-		return 0, 0, fmt.Errorf("Invalid port range")
+		return "", fmt.Errorf("failed to generate random bytes: %v", err)
 	}
 
-	if maxPort < minPort {
-		return 0, 0, fmt.Errorf("Invalid port range")
-	}
+	// to ignore multicast address
+	mac[0] = (mac[0] & 0xfe) | 0x02
 
-	if maxPort-minPort < 2 {
-		return 0, 0, fmt.Errorf("Port range must be minimum 2 ports")
-	}
-
-	return minPort, maxPort, nil
+	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]), nil
 }
 
-func getRandomPortNumberInRange(min int, max int) int {
-	return rand.Intn(max-min) + min
-}
+func findIPFromMAC(macAddress string) (string, error) {
+	cmd := exec.Command("arp", "-a")
+	var out bytes.Buffer
+	cmd.Stdout = &out
 
-func getAvailableTCPPortFromRange(minPort int, maxPort int) (int, error) {
-	port := 0
-	for i := 0; i <= 10; i++ {
-		var ln net.Listener
-		var err error
-		if minPort == 0 && maxPort == 65535 {
-			ln, err = net.Listen("tcp4", "127.0.0.1:0")
-			if err != nil {
-				return 0, err
-			}
-		} else {
-			port = getRandomPortNumberInRange(minPort, maxPort)
-			log.Debugf("testing port: %d", port)
-			ln, err = net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
-			if err != nil {
-				log.Debugf("port already in use: %d", port)
-				continue
-			}
-		}
-		defer ln.Close()
-		addr := ln.Addr().String()
-		addrParts := strings.SplitN(addr, ":", 2)
-		p, err := strconv.Atoi(addrParts[1])
-		if err != nil {
-			return 0, err
-		}
-		if p != 0 {
-			port = p
-			return port, nil
-		}
-		time.Sleep(1)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to execute arp command: %v", err)
 	}
-	return 0, fmt.Errorf("unable to allocate tcp port")
+
+	lines := strings.Split(out.String(), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, macAddress) {
+			fields := strings.Fields(line)
+			if len(fields) > 1 {
+				result := strings.Trim(fields[1], "()")
+				return result, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("MAC address %s not found", macAddress)
 }
 
 func (d *Driver) Start() error {
@@ -481,17 +417,19 @@ func (d *Driver) Start() error {
 		"-pidfile", d.pidfilePath(),
 	)
 
-	if d.Network == "user" {
+	var err error
+	d.MacAddress, err = generateRandomMAC()
+	if err != nil {
+		return err
+	}
+
+	if d.Network == "vmnet-shared" || d.Network == "vmnet-host" {
 		startCmd = append(startCmd,
-			"-nic", fmt.Sprintf("user,model=virtio,hostfwd=tcp::%d-:22,hostfwd=tcp::%d-:2376,hostname=%s", d.SSHPort, d.EnginePort, d.GetMachineName()),
+			"-nic", fmt.Sprintf("%s,id=%s,mac=%s", d.Network, d.NetworkVmnetID, d.MacAddress),
 		)
-	} else if d.Network == "tap" {
+	} else if d.Network == "vmnet-bridged" {
 		startCmd = append(startCmd,
-			"-nic", fmt.Sprintf("tap,model=virtio,ifname=%s,script=no,downscript=no", d.NetworkInterface),
-		)
-	} else if d.Network == "bridge" {
-		startCmd = append(startCmd,
-			"-nic", fmt.Sprintf("bridge,model=virtio,br=%s", d.NetworkBridge),
+			"-nic", fmt.Sprintf("%s,id=%s,mac=%s,ifname=%s", d.Network, d.NetworkVmnetID, d.MacAddress, d.NetworkBridge),
 		)
 	} else {
 		log.Errorf("Unknown network: %s", d.Network)
@@ -527,10 +465,23 @@ func (d *Driver) Start() error {
 		//if err := cmdStart(d.Program, startCmd...); err != nil {
 		//	return err
 	}
-	log.Infof("Waiting for VM to start (ssh -p %d docker@localhost)...", d.SSHPort)
+
+	for i := 0; i < 30; i++ {
+		d.IpAddress, err = findIPFromMAC(d.MacAddress)
+		if err == nil {
+			break
+		}
+
+		time.Sleep(10 * time.Second)
+	}
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Waiting for VM to start (ssh -p %d docker@%s)...", d.SSHPort, d.IpAddress)
 
 	//return ssh.WaitForTCP(fmt.Sprintf("localhost:%d", d.SSHPort))
-	return WaitForTCPWithDelay(fmt.Sprintf("localhost:%d", d.SSHPort), time.Second)
+	return WaitForTCPWithDelay(fmt.Sprintf("%s:%d", d.IpAddress, d.SSHPort), time.Second)
 }
 
 func cmdOutErr(cmdStr string, args ...string) (string, string, error) {
@@ -558,15 +509,9 @@ func cmdOutErr(cmdStr string, args ...string) (string, string, error) {
 	return stdout.String(), stderrStr, err
 }
 
-func cmdStart(cmdStr string, args ...string) error {
-	cmd := exec.Command(cmdStr, args...)
-	log.Debugf("executing: %v %v", cmdStr, strings.Join(args, " "))
-	return cmd.Start()
-}
-
 func (d *Driver) Stop() error {
 	// _, err := d.RunQMPCommand("stop")
-	_, err := d.RunQMPCommand("system_powerdown")
+	_, err := d.RunQMPCommand("system_powerdown", nil)
 	if err != nil {
 		return err
 	}
@@ -584,7 +529,7 @@ func (d *Driver) Remove() error {
 		}
 	}
 	if s != state.Stopped {
-		_, err = d.RunQMPCommand("quit")
+		_, err = d.RunQMPCommand("quit", nil)
 		if err != nil {
 			return err
 		}
@@ -608,7 +553,7 @@ func (d *Driver) Restart() error {
 
 func (d *Driver) Kill() error {
 	// _, err := d.RunQMPCommand("quit")
-	_, err := d.RunQMPCommand("system_powerdown")
+	_, err := d.RunQMPCommand("system_powerdown", nil)
 	if err != nil {
 		return err
 	}
@@ -745,8 +690,7 @@ func (d *Driver) generateUserdataDisk(userdataFile string) (string, error) {
 
 }
 
-func (d *Driver) RunQMPCommand(command string) (map[string]interface{}, error) {
-
+func (d *Driver) RunQMPCommand(command string, argument map[string]interface{}) (map[string]interface{}, error) {
 	// connect to monitor
 	conn, err := net.Dial("unix", d.monitorPath())
 	if err != nil {
@@ -777,12 +721,13 @@ func (d *Driver) RunQMPCommand(command string) (map[string]interface{}, error) {
 	var initialResponse qmpInitialResponse
 	json.Unmarshal(buf[:nr], &initialResponse)
 
+	var jsonCommand []byte
 	// run 'qmp_capabilities' to switch to command mode
 	// { "execute": "qmp_capabilities" }
 	type qmpCommand struct {
 		Command string `json:"execute"`
 	}
-	jsonCommand, err := json.Marshal(qmpCommand{Command: "qmp_capabilities"})
+	jsonCommand, err = json.Marshal(qmpCommand{Command: "qmp_capabilities"})
 	if err != nil {
 		return nil, err
 	}
@@ -794,6 +739,7 @@ func (d *Driver) RunQMPCommand(command string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	type qmpResponse struct {
 		Return map[string]interface{} `json:"return"`
 	}
@@ -812,6 +758,7 @@ func (d *Driver) RunQMPCommand(command string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	_, err = conn.Write(jsonCommand)
 	if err != nil {
 		return nil, err
@@ -820,6 +767,7 @@ func (d *Driver) RunQMPCommand(command string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	err = json.Unmarshal(buf[:nr], &response)
 	if err != nil {
 		return nil, err

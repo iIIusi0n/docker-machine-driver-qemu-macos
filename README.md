@@ -1,7 +1,10 @@
-# Docker machine qemu driver
+# Docker machine qemu driver for latest version of MacOS
 
 I needed a non-libvirt qemu driver, so this is it.
 
+It worked in M1 Mac already but with `user` networking mode only.
+But I needed to create seperated network topology for guest instances.
+This is edited driver that support vmnet-*. (It requires sudo privileges)
 
 from @SvenDowideit
 
@@ -28,10 +31,9 @@ Options:
  - `--qemu-display-type` : Select type of display to use (sdl/vnc=localhost:0/etc)
  - `--qemu-nographic` : Use -nographic instead of -display none. Default: false
  - `--qemu-virtio-drives` : Use virtio for drives (cdrom and disk). Default: false
- - `--qemu-network`: Networking to be used: user, tap or bridge. Default: `user`
- - `--qemu-network-interface`: Name of the network interface to be used for networking. Default: `tap0`
- - `--qemu-network-address`: IP of the network address to be used for networking.
- - `--qemu-network-bridge`: Name of the network bridge to be used for networking. Default: `br0`
+ - `--qemu-network`: Networking to be used: vmnet-shared, vmnet-host or vmnet-bridged. Default: `vmnet-shared`
+ - `--qemu-network-bridge`: Name of the network bridge to be used for networking. (for vmnet-bridged) Default: `en0`
+ - `--qemu-network-vmnet-id`: The vmnet id to use for networking. Default: `net0`
 
 The `--qemu-boot2docker-url` flag takes a few different forms.  By
 default, if no value is specified for this flag, Machine will check locally for
@@ -67,3 +69,10 @@ variable and CLI option are provided the CLI option takes the precedence.
 |-----------------------------------|-----------------------------------|
 | `QEMU_BOOT2DOCKER_URL`            | `--qemu-boot2docker-url`          |
 | `QEMU_VIRTIO_DRIVES`              | `--qemu-virtio-drives`            |
+
+#### WARNING!
+
+It strongly depends on `arp -a` command to resolve IP from Mac address. 
+Not tested on other systems, it assumes output of `arp -a` will be list of `? <IP> <MAC>`.
+
+Planning to use QMP to solve it.
