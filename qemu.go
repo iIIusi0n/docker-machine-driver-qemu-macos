@@ -58,7 +58,6 @@ type Driver struct {
 	CloudConfigRoot string
 	LocalPorts      string
 	MacAddress      string
-	IpAddress       string
 }
 
 func (d *Driver) GetCreateFlags() []mcnflag.Flag {
@@ -236,6 +235,7 @@ func (d *Driver) GetURL() (string, error) {
 }
 
 func NewDriver(hostName, storePath string) drivers.Driver {
+	macAddr, _ := generateRandomMAC()
 	return &Driver{
 		PrivateNetwork: privateNetworkName,
 		BaseDriver: &drivers.BaseDriver{
@@ -243,11 +243,12 @@ func NewDriver(hostName, storePath string) drivers.Driver {
 			MachineName: hostName,
 			StorePath:   storePath,
 		},
+		MacAddress: macAddr,
 	}
 }
 
 func (d *Driver) GetIP() (string, error) {
-	return d.IpAddress, nil
+	return findIPFromMacUsingDhcpdLeases(d.MacAddress)
 }
 
 func (d *Driver) GetPort() int {
@@ -351,27 +352,87 @@ func generateRandomMAC() (string, error) {
 	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]), nil
 }
 
-func findIPFromMAC(macAddress string) (string, error) {
-	cmd := exec.Command("arp", "-a")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to execute arp command: %v", err)
+func findIPFromMacUsingDhcpdLeases(macAddress string) (string, error) {
+	parsedMacAddr, err := net.ParseMAC(macAddress)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse MAC address: %v", err)
 	}
 
-	lines := strings.Split(out.String(), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, macAddress) {
-			fields := strings.Fields(line)
-			if len(fields) > 1 {
-				result := strings.Trim(fields[1], "()")
-				return result, nil
+	leasesFile := "/var/db/dhcpd_leases"
+
+	type Lease struct {
+		IP  string
+		MAC net.HardwareAddr
+	}
+
+	leases := make([]Lease, 0)
+
+	contents, err := os.ReadFile(leasesFile)
+	if err != nil {
+		return "", fmt.Errorf("failed to read dhcpd leases file: %v", err)
+	}
+
+	blocks := strings.Split(string(contents), "}")
+	for _, block := range blocks {
+		var lease Lease
+		block = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(block), "{"))
+
+		for _, line := range strings.Split(block, "\n") {
+			if !strings.Contains(line, "=") {
+				continue
 			}
+
+			line = strings.TrimSpace(line)
+			key := strings.Split(line, "=")[0]
+			value := strings.Split(line, "=")[1]
+
+			if key == "ip_address" {
+				lease.IP = strings.TrimSpace(value)
+			} else if key == "hw_address" {
+				mac := padMacWithZeroes(strings.ToLower(strings.TrimSpace(strings.Split(value, ",")[1])))
+				lease.MAC, err = net.ParseMAC(mac)
+				if err != nil {
+					continue
+				}
+			}
+		}
+
+		if lease.IP != "" && lease.MAC != nil {
+			leases = append(leases, lease)
 		}
 	}
 
-	return "", fmt.Errorf("MAC address %s not found", macAddress)
+	for _, lease := range leases {
+		if compareMacAddresses(lease.MAC, parsedMacAddr) {
+			return lease.IP, nil
+		}
+	}
+
+	return "", fmt.Errorf("MAC address %s not found in dhcpd leases file", macAddress)
+}
+
+func padMacWithZeroes(mac string) string {
+	parts := strings.Split(mac, ":")
+	for i, part := range parts {
+		if len(part) == 1 {
+			parts[i] = "0" + part
+		}
+	}
+	return strings.Join(parts, ":")
+}
+
+func compareMacAddresses(mac1, mac2 net.HardwareAddr) bool {
+	if len(mac1) != len(mac2) {
+		return false
+	}
+
+	for i, b := range mac1 {
+		if b != mac2[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (d *Driver) Start() error {
@@ -417,12 +478,6 @@ func (d *Driver) Start() error {
 		"-pidfile", d.pidfilePath(),
 	)
 
-	var err error
-	d.MacAddress, err = generateRandomMAC()
-	if err != nil {
-		return err
-	}
-
 	if d.Network == "vmnet-shared" || d.Network == "vmnet-host" {
 		startCmd = append(startCmd,
 			"-nic", fmt.Sprintf("%s,id=%s,mac=%s", d.Network, d.NetworkVmnetID, d.MacAddress),
@@ -466,8 +521,10 @@ func (d *Driver) Start() error {
 		//	return err
 	}
 
+	var err error
+	var ip string
 	for i := 0; i < 30; i++ {
-		d.IpAddress, err = findIPFromMAC(d.MacAddress)
+		ip, err = findIPFromMacUsingDhcpdLeases(d.MacAddress)
 		if err == nil {
 			break
 		}
@@ -478,10 +535,10 @@ func (d *Driver) Start() error {
 		return err
 	}
 
-	log.Infof("Waiting for VM to start (ssh -p %d docker@%s)...", d.SSHPort, d.IpAddress)
+	log.Infof("Waiting for VM to start (ssh -p %d docker@%s)...", d.SSHPort, ip)
 
 	//return ssh.WaitForTCP(fmt.Sprintf("localhost:%d", d.SSHPort))
-	return WaitForTCPWithDelay(fmt.Sprintf("%s:%d", d.IpAddress, d.SSHPort), time.Second)
+	return WaitForTCPWithDelay(fmt.Sprintf("%s:%d", ip, d.SSHPort), time.Second)
 }
 
 func cmdOutErr(cmdStr string, args ...string) (string, string, error) {
