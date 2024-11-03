@@ -75,4 +75,6 @@ variable and CLI option are provided the CLI option takes the precedence.
 It strongly depends on `arp -a` command to resolve IP from Mac address. 
 Not tested on other systems, it assumes output of `arp -a` will be list of `? <IP> <MAC>`.
 
+UPDATED: It is updated to read and parse DHCP leases file but still not tested on various systems.
+
 Planning to use QMP to solve it.
