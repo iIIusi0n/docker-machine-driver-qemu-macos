@@ -353,16 +353,11 @@ func generateRandomMAC() (string, error) {
 }
 
 func findIPFromMacUsingDhcpdLeases(macAddress string) (string, error) {
-	parsedMacAddr, err := net.ParseMAC(macAddress)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse MAC address: %v", err)
-	}
-
 	leasesFile := "/var/db/dhcpd_leases"
 
 	type Lease struct {
 		IP  string
-		MAC net.HardwareAddr
+		MAC string
 	}
 
 	leases := make([]Lease, 0)
@@ -389,21 +384,17 @@ func findIPFromMacUsingDhcpdLeases(macAddress string) (string, error) {
 			if key == "ip_address" {
 				lease.IP = strings.TrimSpace(value)
 			} else if key == "hw_address" {
-				mac := padMacWithZeroes(strings.ToLower(strings.TrimSpace(strings.Split(value, ",")[1])))
-				lease.MAC, err = net.ParseMAC(mac)
-				if err != nil {
-					continue
-				}
+				lease.MAC = padMacWithZeroes(strings.ToLower(strings.TrimSpace(strings.Split(value, ",")[1])))
 			}
 		}
 
-		if lease.IP != "" && lease.MAC != nil {
+		if lease.IP != "" && lease.MAC != "" {
 			leases = append(leases, lease)
 		}
 	}
 
 	for _, lease := range leases {
-		if compareMacAddresses(lease.MAC, parsedMacAddr) {
+		if lease.MAC == macAddress {
 			return lease.IP, nil
 		}
 	}
@@ -414,25 +405,9 @@ func findIPFromMacUsingDhcpdLeases(macAddress string) (string, error) {
 func padMacWithZeroes(mac string) string {
 	parts := strings.Split(mac, ":")
 	for i, part := range parts {
-		if len(part) == 1 {
-			parts[i] = "0" + part
-		}
+		parts[i] = fmt.Sprintf("%02s", part)
 	}
 	return strings.Join(parts, ":")
-}
-
-func compareMacAddresses(mac1, mac2 net.HardwareAddr) bool {
-	if len(mac1) != len(mac2) {
-		return false
-	}
-
-	for i, b := range mac1 {
-		if b != mac2[i] {
-			return false
-		}
-	}
-
-	return true
 }
 
 func (d *Driver) Start() error {
