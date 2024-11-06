@@ -352,26 +352,18 @@ func generateRandomMAC() (string, error) {
 	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]), nil
 }
 
-func findIPFromMacUsingDhcpdLeases(macAddress string) (string, error) {
-	leasesFile := "/var/db/dhcpd_leases"
-
-	type Lease struct {
-		IP  string
-		MAC string
-	}
-
-	leases := make([]Lease, 0)
-
-	contents, err := os.ReadFile(leasesFile)
+func findIPFromMacUsingCustomDhcpdLeases(targetMac, dhcpdPath string) (string, error) {
+	contents, err := os.ReadFile(dhcpdPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read dhcpd leases file: %v", err)
 	}
 
 	blocks := strings.Split(string(contents), "}")
 	for _, block := range blocks {
-		var lease Lease
-		block = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(block), "{"))
+		ipAddress := ""
+		macAddress := ""
 
+		block = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(block), "{"))
 		for _, line := range strings.Split(block, "\n") {
 			if !strings.Contains(line, "=") {
 				continue
@@ -382,24 +374,22 @@ func findIPFromMacUsingDhcpdLeases(macAddress string) (string, error) {
 			value := strings.Split(line, "=")[1]
 
 			if key == "ip_address" {
-				lease.IP = strings.TrimSpace(value)
+				ipAddress = strings.TrimSpace(value)
 			} else if key == "hw_address" {
-				lease.MAC = padMacWithZeroes(strings.ToLower(strings.TrimSpace(strings.Split(value, ",")[1])))
+				macAddress = padMacWithZeroes(strings.ToLower(strings.TrimSpace(strings.Split(value, ",")[1])))
 			}
 		}
 
-		if lease.IP != "" && lease.MAC != "" {
-			leases = append(leases, lease)
+		if ipAddress != "" && macAddress != "" && macAddress == targetMac {
+			return ipAddress, nil
 		}
 	}
 
-	for _, lease := range leases {
-		if lease.MAC == macAddress {
-			return lease.IP, nil
-		}
-	}
+	return "", fmt.Errorf("MAC address %s not found in dhcpd leases file", targetMac)
+}
 
-	return "", fmt.Errorf("MAC address %s not found in dhcpd leases file", macAddress)
+func findIPFromMacUsingDhcpdLeases(macAddress string) (string, error) {
+	return findIPFromMacUsingCustomDhcpdLeases(macAddress, "/var/db/dhcpd_leases")
 }
 
 func padMacWithZeroes(mac string) string {

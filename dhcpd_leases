@@ -1,0 +1,14 @@
+{
+	name=boot2docker
+	ip_address=192.168.64.56
+	hw_address=1,2:f8:c3:ce:56:a7
+	identifier=1,2:f8:c3:ce:56:a7
+	lease=0x672b0637
+}
+{
+	name=boot2docker
+	hw_address=1,16:9b:4b:17:34:4a
+	identifier=1,16:9b:4b:17:34:4a
+	ip_address=192.168.64.55
+	lease=0x672b0625
+}
